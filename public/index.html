@@ -1,0 +1,287 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Bot Monitor</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: #f6f7f9;
+      --card: #ffffff;
+      --text: #1d2330;
+      --muted: #6b7385;
+      --line: #e3e6ec;
+      --up: #1f9d55;
+      --degraded: #d69e2e;
+      --down: #e53e3e;
+      --nodata: #8a93a6;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root:not([data-theme="light"]) {
+        --bg: #12151c;
+        --card: #1b2029;
+        --text: #e6e9f0;
+        --muted: #8a93a6;
+        --line: #2a303c;
+      }
+    }
+    :root[data-theme="dark"] {
+      --bg: #12151c;
+      --card: #1b2029;
+      --text: #e6e9f0;
+      --muted: #8a93a6;
+      --line: #2a303c;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      padding: 24px 16px;
+      background: var(--bg);
+      color: var(--text);
+      font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    }
+    header {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: space-between;
+      align-items: baseline;
+      gap: 8px;
+      max-width: 1200px;
+      margin: 0 auto 20px;
+    }
+    h1 { font-size: 22px; margin: 0; }
+    .muted { color: var(--muted); font-size: 13px; }
+    main { max-width: 1200px; margin: 0 auto; display: grid; gap: 20px; }
+    .bot {
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 20px;
+    }
+    .bot-head {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 16px;
+    }
+    .bot-title { font-size: 18px; font-weight: 600; margin: 0; }
+    .pill {
+      display: inline-block;
+      padding: 2px 10px;
+      border-radius: 999px;
+      color: #fff;
+      font-size: 13px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.03em;
+    }
+    .stats {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+      gap: 12px;
+      margin-bottom: 18px;
+    }
+    .stat { border: 1px solid var(--line); border-radius: 10px; padding: 12px; }
+    .stat-label { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; }
+    .stat-value { font-size: 22px; font-weight: 600; margin-top: 2px; }
+    .charts {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+      gap: 16px;
+    }
+    .chart { position: relative; height: 220px; }
+    .chart h3 { font-size: 14px; margin: 0 0 6px; font-weight: 600; }
+    .wide { grid-column: 1 / -1; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+    th { color: var(--muted); font-weight: 600; }
+    td.msg { word-break: break-word; }
+    .empty { color: var(--muted); font-size: 13px; padding: 8px 0; }
+    .error-banner {
+      display: none;
+      max-width: 1200px;
+      margin: 0 auto 16px;
+      padding: 10px 14px;
+      border-radius: 10px;
+      background: #fde8e8;
+      color: #9b1c1c;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root:not([data-theme="light"]) .error-banner { background: #3b1a1a; color: #fca5a5; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Bot Monitor</h1>
+    <span class="muted" id="updated">Loading…</span>
+  </header>
+  <div class="error-banner" id="banner">Can't reach the monitor server. Retrying…</div>
+  <main id="bots"></main>
+
+  <script>
+    const COLORS = {
+      up: '#1f9d55',
+      degraded: '#d69e2e',
+      down: '#e53e3e',
+      'no-data': '#8a93a6',
+      series: ['#3b82f6', '#8b5cf6', '#14b8a6', '#f59e0b', '#ec4899'],
+      error: '#e53e3e',
+    };
+    const STATUS_LABEL = { up: 'Up', degraded: 'Errors', down: 'Down', 'no-data': 'No data' };
+
+    const charts = {};
+    const cards = {};
+
+    function ago(t) {
+      if (!t) return 'never';
+      const s = Math.round((Date.now() - t) / 1000);
+      if (s < 60) return `${s}s ago`;
+      if (s < 3600) return `${Math.round(s / 60)}m ago`;
+      return `${Math.round(s / 3600)}h ago`;
+    }
+
+    function esc(text) {
+      return String(text).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    }
+
+    function buildCard(bot) {
+      const card = document.createElement('section');
+      card.className = 'bot';
+      card.innerHTML = `
+        <div class="bot-head">
+          <h2 class="bot-title">${esc(bot.name)}</h2>
+          <span class="pill" data-role="pill"></span>
+        </div>
+        <div class="stats">
+          <div class="stat"><div class="stat-label">Last seen</div><div class="stat-value" data-role="seen">–</div></div>
+          <div class="stat"><div class="stat-label">Uptime (24h)</div><div class="stat-value" data-role="uptime">–</div></div>
+          <div class="stat"><div class="stat-label">Traffic (24h)</div><div class="stat-value" data-role="traffic">–</div></div>
+          <div class="stat"><div class="stat-label">Errors (24h)</div><div class="stat-value" data-role="errors">–</div></div>
+          <div class="stat"><div class="stat-label">Servers</div><div class="stat-value" data-role="guilds">–</div></div>
+          <div class="stat"><div class="stat-label">Memory</div><div class="stat-value" data-role="memory">–</div></div>
+        </div>
+        <div class="charts">
+          <div class="chart wide"><h3>Heartbeat, last 24h (5-minute slots)</h3><canvas id="${bot.id}-timeline"></canvas></div>
+          <div class="chart"><h3>Traffic per hour</h3><canvas id="${bot.id}-traffic"></canvas></div>
+          <div class="chart"><h3>Errors per hour</h3><canvas id="${bot.id}-errors"></canvas></div>
+          <div class="wide">
+            <h3 style="font-size:14px;margin:12px 0 6px">Recent errors</h3>
+            <div data-role="errlist"></div>
+          </div>
+        </div>`;
+      return card;
+    }
+
+    function makeCharts(id) {
+      const opts = (extra) => ({
+        responsive: true,
+        maintainAspectRatio: false,
+        animation: false,
+        plugins: { legend: { labels: { boxWidth: 12 } } },
+        ...extra,
+      });
+      charts[id] = {
+        timeline: new Chart(document.getElementById(`${id}-timeline`), {
+          type: 'bar',
+          data: { labels: [], datasets: [{ data: [], backgroundColor: [] }] },
+          options: opts({
+            plugins: { legend: { display: false }, tooltip: { callbacks: { label: (c) => (c.raw === 1 ? 'Heartbeat' : c.raw === 0 ? 'Missed' : 'No data') } } },
+            scales: { x: { ticks: { maxTicksLimit: 8 } }, y: { min: 0, max: 1, ticks: { display: false }, grid: { display: false } } },
+          }),
+        }),
+        traffic: new Chart(document.getElementById(`${id}-traffic`), {
+          type: 'bar',
+          data: { labels: [], datasets: [] },
+          options: opts({ scales: { x: { stacked: true }, y: { stacked: true, beginAtZero: true, ticks: { precision: 0 } } } }),
+        }),
+        errors: new Chart(document.getElementById(`${id}-errors`), {
+          type: 'bar',
+          data: { labels: [], datasets: [{ label: 'Errors', data: [], backgroundColor: COLORS.error }] },
+          options: opts({ scales: { y: { beginAtZero: true, ticks: { precision: 0 } } } }),
+        }),
+      };
+    }
+
+    function updateBot(bot) {
+      const card = cards[bot.id];
+      const set = (role, text) => { card.querySelector(`[data-role="${role}"]`).textContent = text; };
+      const pill = card.querySelector('[data-role="pill"]');
+      pill.textContent = STATUS_LABEL[bot.status] ?? bot.status;
+      pill.style.background = COLORS[bot.status] ?? COLORS['no-data'];
+
+      set('seen', ago(bot.lastSeen));
+      set('uptime', bot.hasData ? `${(bot.uptime24h * 100).toFixed(1)}%` : '–');
+      set('traffic', bot.hasData ? bot.trafficTotal.toLocaleString('en-US') : '–');
+      set('errors', bot.hasData ? String(bot.errors24h) : '–');
+      set('guilds', bot.guilds ?? '–');
+      set('memory', bot.memoryMb ? `${Math.round(bot.memoryMb)} MB` : '–');
+
+      const list = card.querySelector('[data-role="errlist"]');
+      if (!bot.recentErrors || bot.recentErrors.length === 0) {
+        list.innerHTML = '<div class="empty">No errors in the last 24 hours.</div>';
+      } else {
+        list.innerHTML = `<table><thead><tr><th>When</th><th>Where</th><th>Message</th></tr></thead><tbody>${
+          bot.recentErrors.map((e) => `<tr><td>${esc(new Date(e.t).toLocaleString())}</td><td>${esc(e.source)}</td><td class="msg">${esc(e.message)}</td></tr>`).join('')
+        }</tbody></table>`;
+      }
+
+      const c = charts[bot.id];
+      const labels = bot.hourLabels;
+
+      c.timeline.data.labels = bot.timeline.map((_, i) => {
+        const minutesAgo = (bot.timeline.length - 1 - i) * 5;
+        return minutesAgo === 0 ? 'now' : `-${Math.floor(minutesAgo / 60)}h${String(minutesAgo % 60).padStart(2, '0')}`;
+      });
+      c.timeline.data.datasets[0].data = bot.timeline.map((v) => (v === null ? 1 : v));
+      c.timeline.data.datasets[0].backgroundColor = bot.timeline.map((v) => (v === null ? COLORS['no-data'] + '55' : v === 1 ? COLORS.up : COLORS.down));
+      c.timeline.update();
+
+      const types = Object.keys(bot.traffic);
+      c.traffic.data.labels = labels;
+      c.traffic.data.datasets = types.map((type, i) => ({
+        label: type,
+        data: bot.traffic[type],
+        backgroundColor: COLORS.series[i % COLORS.series.length],
+      }));
+      c.traffic.update();
+
+      c.errors.data.labels = labels;
+      c.errors.data.datasets[0].data = bot.errorsByHour;
+      c.errors.update();
+    }
+
+    function ensureCard(bot) {
+      if (cards[bot.id]) return;
+      const card = buildCard(bot);
+      document.getElementById('bots').appendChild(card);
+      cards[bot.id] = card;
+      makeCharts(bot.id);
+    }
+
+    async function refresh() {
+      const banner = document.getElementById('banner');
+      try {
+        const res = await fetch('/api/status', { cache: 'no-store' });
+        if (!res.ok) throw new Error(res.statusText);
+        const status = await res.json();
+        banner.style.display = 'none';
+        status.bots.forEach((bot) => {
+          ensureCard(bot);
+          updateBot(bot);
+        });
+        document.getElementById('updated').textContent = `Updated ${new Date(status.generatedAt).toLocaleTimeString()}`;
+      } catch {
+        banner.style.display = 'block';
+      }
+    }
+
+    refresh();
+    setInterval(refresh, 15000);
+  </script>
+</body>
+</html>
