@@ -132,7 +132,62 @@ function buildStatus(now) {
   return { generatedAt: now, bots: BOTS.map((bot) => summarize(bot, now)) };
 }
 
+// Bots on other machines (such as a hosting service) post their events here.
+// Each event is written to the same file the local reader already uses.
+const INGEST_TOKEN = process.env.INGEST_TOKEN || '';
+const MAX_INGEST_BYTES = 64 * 1024;
+
+function handleIngest(req, res) {
+  if (!INGEST_TOKEN || req.headers.authorization !== `Bearer ${INGEST_TOKEN}`) {
+    res.writeHead(401).end();
+    return;
+  }
+
+  let body = '';
+  let tooLarge = false;
+  req.on('data', (chunk) => {
+    body += chunk;
+    if (body.length > MAX_INGEST_BYTES) {
+      tooLarge = true;
+      res.writeHead(413).end();
+      req.destroy();
+    }
+  });
+  req.on('end', () => {
+    if (tooLarge) return;
+
+    let items;
+    try {
+      const parsed = JSON.parse(body);
+      items = Array.isArray(parsed) ? parsed : [parsed];
+    } catch {
+      res.writeHead(400).end('Bad JSON');
+      return;
+    }
+
+    const valid = items.every(
+      (item) => item && typeof item.t === 'number' && BOTS.some((bot) => bot.id === item.bot)
+    );
+    if (!valid) {
+      res.writeHead(400).end('Each event needs a numeric t and a known bot');
+      return;
+    }
+
+    fs.mkdirSync(METRICS_DIR, { recursive: true });
+    for (const item of items) {
+      const file = BOTS.find((bot) => bot.id === item.bot).file;
+      fs.appendFileSync(path.join(METRICS_DIR, file), JSON.stringify(item) + '\n');
+    }
+    res.writeHead(204).end();
+  });
+}
+
 const server = http.createServer((req, res) => {
+  if (req.method === 'POST' && req.url === '/api/ingest') {
+    handleIngest(req, res);
+    return;
+  }
+
   if (req.url === '/api/status') {
     res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });
     res.end(JSON.stringify(buildStatus(Date.now())));
